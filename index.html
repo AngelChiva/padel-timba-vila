@@ -112,6 +112,26 @@
   .aviso.ok{background:#eaf7ef;border-color:#bfe4cd;color:var(--verde-osc);}
   a.enlace-admin{font-size:12px;color:rgba(255,255,255,.85);text-decoration:underline;cursor:pointer;}
   .normas-texto{white-space:pre-wrap;font-size:14px;line-height:1.5;}
+  .grupo-cuatro{
+    border:1.5px solid var(--borde);border-radius:10px;padding:10px 12px;margin-bottom:10px;
+    background:#fbfcfb;transition:background .2s,border-color .2s;
+  }
+  .grupo-cuatro.parcial{border-color:#f0d9ad;background:#fffaf0;}
+  .grupo-cuatro.completo{border-color:var(--verde);background:#eaf7ef;}
+  .grupo-cuatro.espera{border-style:dashed;}
+  .grupo-cuatro-cabecera{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;}
+  .grupo-cuatro-cabecera strong{color:var(--verde-osc);font-size:13.5px;}
+  .pill-completa{background:var(--verde);color:#fff;border-radius:20px;padding:2px 9px;font-size:11px;font-weight:700;white-space:nowrap;}
+  .pill-faltan{background:var(--ambar);color:#fff;border-radius:20px;padding:2px 9px;font-size:11px;font-weight:700;white-space:nowrap;}
+  .slots-grupo{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;}
+  .slot-jugador{font-size:13.5px;padding:4px 8px;border-radius:6px;background:#fff;border:1px solid var(--borde);}
+  .slot-jugador.libre{color:var(--gris);font-style:italic;border-style:dashed;background:transparent;}
+  .lista-jugadores li.jugador-apuntado{background:#eaf7ef;margin:0 -16px;padding:9px 16px;}
+  .lista-jugadores li.jugador-apuntado span:first-child{color:var(--verde-osc);font-weight:600;}
+  .badge-apuntado{
+    background:var(--verde);color:#fff;border-radius:20px;padding:1px 8px;font-size:10px;font-weight:700;
+    margin-left:6px;vertical-align:middle;
+  }
   .fila-jugador-admin{display:flex;gap:8px;align-items:center;padding:7px 0;border-bottom:1px solid var(--borde);}
   .fila-jugador-admin span{flex:1;}
   .grupo-collapse summary{cursor:pointer;font-weight:600;color:var(--verde-osc);padding:6px 0;}
@@ -150,7 +170,8 @@
     </div>
     <div class="card">
       <h3>Apuntados (<span id="numApuntados">0</span>)</h3>
-      <ul class="lista-jugadores" id="listaApuntados"></ul>
+      <p class="muted">Se van agrupando de 4 en 4 según se apunta la gente — cada grupo es una pista.</p>
+      <div id="listaApuntados"></div>
     </div>
     <div class="card" id="cardSorteo" style="display:none;">
       <h3>Sorteo de esta jornada</h3>
@@ -457,6 +478,39 @@ function renderLiga(){
 }
 
 // ---- JORNADAS ---------------------------------------------------------------
+function renderGruposDeCuatro(ids, numPistas){
+  if (!ids.length){
+    return '<p class="muted">Nadie apuntado todavía</p>';
+  }
+  const grupos = [];
+  for (let i = 0; i < ids.length; i += 4){
+    grupos.push(ids.slice(i, i + 4));
+  }
+  return grupos.map((grupo, gi) => {
+    const esEspera = gi >= numPistas;
+    const completo = grupo.length === 4;
+    const titulo = esEspera ? `Lista de espera ${gi - numPistas + 1}` : `Pista ${gi + 1}`;
+    const pill = completo
+      ? '<span class="pill-completa">completa ✓</span>'
+      : `<span class="pill-faltan">faltan ${4 - grupo.length}</span>`;
+    const slots = Array.from({ length: 4 }, (_, si) => {
+      const id = grupo[si];
+      return id
+        ? `<div class="slot-jugador">${si + 1}. ${nombreJugador(id)}</div>`
+        : '<div class="slot-jugador libre">— libre —</div>';
+    }).join('');
+    return `
+      <div class="grupo-cuatro ${completo ? 'completo' : 'parcial'} ${esEspera ? 'espera' : ''}">
+        <div class="grupo-cuatro-cabecera">
+          <strong>${titulo}</strong>
+          ${pill}
+        </div>
+        <div class="slots-grupo">${slots}</div>
+      </div>
+    `;
+  }).join('');
+}
+
 function renderJornadas(){
   const jor = estado.jornadaActual;
   const fecha = jor.fecha || proximaFechaPorDefecto(estado.horario.diaJuego);
@@ -495,12 +549,7 @@ function renderJornadas(){
   }
 
   document.getElementById('numApuntados').textContent = apuntadosIds.length;
-  document.getElementById('listaApuntados').innerHTML = apuntadosIds.map((id, i) => `
-    <li>
-      <span>${i+1}. ${nombreJugador(id)}</span>
-      ${i >= capacidad ? `<span class="badge-espera">lista de espera</span>` : ''}
-    </li>
-  `).join('') || '<li class="muted">Nadie apuntado todavía</li>';
+  document.getElementById('listaApuntados').innerHTML = renderGruposDeCuatro(apuntadosIds, estado.numPistas);
 
   // sorteo (si ya se ha hecho)
   const cardSorteo = document.getElementById('cardSorteo');
@@ -675,11 +724,18 @@ async function cerrarJornada(){
 
 // ---- JUGADORES --------------------------------------------------------------
 function renderJugadores(){
+  const apuntadosSet = new Set((estado.jornadaActual.apuntados) || []);
   const activos = estado.jugadores.filter(j=>j.activo).sort((a,b)=>a.nombre.localeCompare(b.nombre));
   document.getElementById('numJugadoresTotal').textContent = activos.length;
-  document.getElementById('listaJugadoresTodos').innerHTML = activos.map(j => `
-    <li><span>${j.nombre}</span><span class="muted">${j.pistaActual ? 'Pista ' + j.pistaActual : 'sin jornadas'}</span></li>
-  `).join('') || '<li class="muted">Todavía no hay jugadores.</li>';
+  document.getElementById('listaJugadoresTodos').innerHTML = activos.map(j => {
+    const apuntado = apuntadosSet.has(j.id);
+    return `
+      <li class="${apuntado ? 'jugador-apuntado' : ''}">
+        <span>${j.nombre}${apuntado ? '<span class="badge-apuntado">apuntado</span>' : ''}</span>
+        <span class="muted">${j.pistaActual ? 'Pista ' + j.pistaActual : 'sin jornadas'}</span>
+      </li>
+    `;
+  }).join('') || '<li class="muted">Todavía no hay jugadores.</li>';
 }
 
 // ---- NORMAS -----------------------------------------------------------------
