@@ -352,7 +352,7 @@ function estadoInicial(){
       apuntados: [],          // ids en orden de llegada
       sorteoHecho: false,
       pistas: [],             // [{numero, parejaA:[id,id], parejaB:[id,id]}]
-      resultados: {},         // { numeroPista: {setsA, setsB} }
+      resultados: {},         // { idJugador: pistaFinal } — pista en la que ha acabado cada jugador
       cerrada: false
     },
     historial: [],           // jornadas ya cerradas: {fecha, pistas, resultados, puntos:{id:pts}, ausentes:[id]}
@@ -622,20 +622,38 @@ function renderJornadas(){
 
   // historial
   document.getElementById('historialJornadas').innerHTML = estado.historial.length
-    ? estado.historial.slice().reverse().map(j => `
+    ? estado.historial.slice().reverse().map(j => {
+        const finalPorId = j.resultados || {};
+        const nHist = (j.pistas && j.pistas.length) ? j.pistas.length : estado.numPistas;
+        const porPistaFinal = {};
+        Object.entries(finalPorId).forEach(([id, pistaFinal]) => {
+          (porPistaFinal[pistaFinal] = porPistaFinal[pistaFinal] || []).push(id);
+        });
+        const huboFinal = Object.keys(porPistaFinal).length > 0;
+        return `
         <details class="grupo-collapse">
           <summary>${formatearFecha(j.fecha)} — ${(j.pistas||[]).length} pistas</summary>
-          ${(j.pistas||[]).map(p => {
-            const r = (j.resultados||{})[p.numero] || {};
-            return `<div class="pista-box">
-              <h4>Pista ${p.numero}${r.setsA!==undefined ? ` — ${r.setsA} a ${r.setsB}` : ''}</h4>
+          <p class="muted" style="margin:6px 0;">Sorteo inicial:</p>
+          ${(j.pistas||[]).map(p => `
+            <div class="pista-box">
+              <h4>Pista ${p.numero}</h4>
               <div class="pareja">🔵 ${p.parejaA.map(nombreJugador).join(' + ')}</div>
               <div class="pareja">🔴 ${p.parejaB.map(nombreJugador).join(' + ')}</div>
-            </div>`;
-          }).join('')}
+            </div>
+          `).join('')}
+          ${huboFinal ? `
+            <p class="muted" style="margin:10px 0 6px;">Cómo acabaron (puntos):</p>
+            ${Object.keys(porPistaFinal).sort((a,b)=>a-b).map(num => `
+              <div class="pista-box">
+                <h4>Pista ${num} — ${nHist - (num - 1)} pt${(nHist - (num-1)) === 1 ? '' : 's'}</h4>
+                <div class="pareja">${porPistaFinal[num].map(nombreJugador).join(', ')}</div>
+              </div>
+            `).join('')}
+          ` : ''}
           ${j.ausentes && j.ausentes.length ? `<p class="muted">Ausentes: ${j.ausentes.map(nombreJugador).join(', ')}</p>` : ''}
         </details>
-      `).join('')
+      `;
+      }).join('')
     : '<p class="muted">Todavía no hay jornadas cerradas.</p>';
 }
 
@@ -658,6 +676,20 @@ async function apuntarseAJornada(idJugador, apuntar){
 }
 
 // ---- RESULTADOS ------------------------------------------------------------
+// Es una "americana": durante la jornada se va rotando de pista cada ~15 minutos
+// (el que gana sube, el que pierde baja), en persona y sin que la app lo controle.
+// Por eso aquí NO se meten sets ni marcadores de un partido: al terminar la noche,
+// el admin simplemente indica en qué pista ha acabado cada jugador, y de eso salen
+// los puntos (pista 1 = más puntos) y la pista de salida para el próximo sorteo.
+function opcionesPistasFinal(n, seleccionada){
+  let html = '';
+  for (let k = 1; k <= n; k++){
+    const pts = n - (k - 1);
+    html += `<option value="${k}" ${Number(seleccionada) === k ? 'selected' : ''}>Pista ${k} (${pts} pt${pts === 1 ? '' : 's'})</option>`;
+  }
+  return html;
+}
+
 function renderResultados(){
   const jor = estado.jornadaActual;
   const info = document.getElementById('resultadosInfo');
@@ -668,24 +700,28 @@ function renderResultados(){
     cont.innerHTML = '';
     return;
   }
-  info.textContent = `Jornada del ${formatearFecha(jor.fecha)}. Introduce el resultado de cada pista (sets ganados por cada pareja).`;
+  info.textContent = `Jornada del ${formatearFecha(jor.fecha)}. Indica en qué pista ha acabado cada jugador al terminar la noche (no hace falta apuntar los sets de cada partido).`;
 
-  cont.innerHTML = jor.pistas.map(p => {
-    const r = (jor.resultados||{})[p.numero] || {};
-    return `
+  const guardados = jor.resultados || {};
+  const n = estado.numPistas;
+
+  cont.innerHTML = jor.pistas.map(p => `
       <div class="pista-box">
-        <h4>Pista ${p.numero}</h4>
+        <h4>Pista ${p.numero} (inicio)</h4>
         <div class="pareja">🔵 ${p.parejaA.map(nombreJugador).join(' + ')}</div>
         <div class="pareja">🔴 ${p.parejaB.map(nombreJugador).join(' + ')}</div>
-        <div class="marcador" style="margin-top:8px;">
-          <span class="muted">Sets:</span>
-          <input type="number" min="0" max="9" id="setsA_${p.numero}" value="${r.setsA ?? ''}" ${!adminAutenticado ? 'disabled' : ''}>
-          <span>–</span>
-          <input type="number" min="0" max="9" id="setsB_${p.numero}" value="${r.setsB ?? ''}" ${!adminAutenticado ? 'disabled' : ''}>
+        <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
+          ${[...p.parejaA, ...p.parejaB].map(id => `
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+              <span>${nombreJugador(id)}</span>
+              <select id="pistaFinal_${id}" ${!adminAutenticado ? 'disabled' : ''}>
+                ${opcionesPistasFinal(n, guardados[id] ?? p.numero)}
+              </select>
+            </div>
+          `).join('')}
         </div>
       </div>
-    `;
-  }).join('') + (adminAutenticado ? `
+    `).join('') + (adminAutenticado ? `
       <div class="fila-botones">
         <button id="btnGuardarResultados">Guardar resultados</button>
         <button id="btnCerrarJornada" class="secundario">Cerrar jornada y repartir puntos</button>
@@ -702,12 +738,10 @@ function renderResultados(){
 function leerResultadosDelFormulario(){
   const jor = estado.jornadaActual;
   const resultados = {};
-  for (const p of jor.pistas){
-    const a = document.getElementById('setsA_' + p.numero).value;
-    const b = document.getElementById('setsB_' + p.numero).value;
-    if (a !== '' && b !== ''){
-      resultados[p.numero] = { setsA: Number(a), setsB: Number(b) };
-    }
+  const idsQueJuegan = jor.pistas.flatMap(p => [...p.parejaA, ...p.parejaB]);
+  for (const id of idsQueJuegan){
+    const el = document.getElementById('pistaFinal_' + id);
+    if (el && el.value !== '') resultados[id] = Number(el.value);
   }
   return resultados;
 }
@@ -724,10 +758,11 @@ async function guardarResultadosParciales(){
 async function cerrarJornada(){
   const resultados = leerResultadosDelFormulario();
   const jor = estado.jornadaActual;
-  const faltan = jor.pistas.filter(p => resultados[p.numero] === undefined);
+  const idsQueJugaron = new Set(jor.pistas.flatMap(p => [...p.parejaA, ...p.parejaB]));
+  const faltan = [...idsQueJugaron].filter(id => resultados[id] === undefined);
   if (faltan.length){
     document.getElementById('avisoResultadosCierre').textContent =
-      `Faltan resultados en la pista ${faltan.map(p=>p.numero).join(', ')}.`;
+      `Falta indicar en qué pista acabó: ${faltan.map(nombreJugador).join(', ')}.`;
     return;
   }
   if (!confirm('¿Cerrar la jornada y repartir los puntos? Después no se podrá editar el resultado desde aquí.')) return;
@@ -736,20 +771,13 @@ async function cerrarJornada(){
   const puntos = {};
   const nuevaPistaPorJugador = {};
 
-  jor.pistas.forEach(p => {
-    const r = resultados[p.numero];
-    const ganaA = r.setsA > r.setsB;
-    const ptsPista = n - (p.numero - 1);
-    [...p.parejaA, ...p.parejaB].forEach(id => { puntos[id] = ptsPista; });
-
-    const parejaGanadora = ganaA ? p.parejaA : p.parejaB;
-    const parejaPerdedora = ganaA ? p.parejaB : p.parejaA;
-    parejaGanadora.forEach(id => { nuevaPistaPorJugador[id] = Math.max(1, p.numero - 1); });
-    parejaPerdedora.forEach(id => { nuevaPistaPorJugador[id] = Math.min(n, p.numero + 1); });
+  idsQueJugaron.forEach(id => {
+    const pistaFinal = resultados[id];
+    puntos[id] = n - (pistaFinal - 1);
+    nuevaPistaPorJugador[id] = pistaFinal;
   });
 
   // jugadores activos que no jugaron esta jornada -> 0 puntos, sin cambios de pista
-  const idsQueJugaron = new Set(jor.pistas.flatMap(p => [...p.parejaA, ...p.parejaB]));
   const ausentes = jugadoresActivos().map(j=>j.id).filter(id => !idsQueJugaron.has(id));
 
   const ok = await guardarEstado(est => {
