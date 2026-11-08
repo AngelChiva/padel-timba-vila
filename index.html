@@ -542,6 +542,24 @@ function proximaFechaPorDefecto(diaSemana, horaTexto){
   return `${yyyy}-${mm}-${dd}`;
 }
 
+// Fecha que "tocaría" para la próxima jornada si se juega cada semana sin
+// falta: 7 días después de la última jornada que hay en el historial. Sirve
+// solo para avisar (no para bloquear) si la fecha puesta no sigue la
+// cadencia semanal normal — p. ej. si se cambia de semana sin querer, o si
+// una semana no se juega y luego se le olvida avisar.
+function fechaSiguienteEsperada(){
+  if (!estado.historial.length) return null;
+  const ultima = estado.historial[estado.historial.length - 1].fecha;
+  if (!ultima) return null;
+  const [y, m, d] = ultima.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  dt.setDate(dt.getDate() + 7);
+  const yyyy = dt.getFullYear();
+  const mm = String(dt.getMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
 function mezclar(array){
   const a = array.slice();
   for (let i = a.length - 1; i > 0; i--){
@@ -1311,6 +1329,17 @@ async function cerrarJornada(){
     return;
   }
 
+  // Aviso (no bloqueante) si la fecha no sigue la cadencia semanal normal —
+  // p. ej. si por error no se cambió la fecha de la semana pasada, o si se
+  // saltó una semana y no se avisó. El admin puede confirmar igualmente.
+  const esperada = fechaSiguienteEsperada();
+  if (jor.fecha && esperada && jor.fecha !== esperada){
+    if (!confirm(
+      `Ojo: si se juega cada semana sin falta, esta jornada tendría que ser el ${formatearFecha(esperada)}, y la fecha puesta es ${fechaLegible}. ` +
+      `¿Seguro que ${fechaLegible} es la fecha correcta de HOY? (si esta semana se cambia de día o no se jugó la anterior, confirma igualmente)`
+    )) return;
+  }
+
   if (!confirm(`¿Cerrar la jornada del ${fechaLegible} y repartir los puntos? Después no se podrá editar el resultado desde aquí.`)) return;
 
   const n = estado.numPistas;
@@ -1434,75 +1463,6 @@ function renderAdmin(){
   }
 }
 
-// --------------------------------------------------------------------------
-// Reparación puntual del historial de octubre-noviembre 2026: por el fallo de
-// guardado doble (ver cerrarJornada), la jornada del 16/10 quedó con la fecha
-// 23/10 (duplicando esa fecha con la que sí era del 23/10), la del 30/10 se
-// guardó con la fecha 06/11, y la del 06/11 se guardó DOS veces con la fecha
-// 13/11 (fecha que además todavía no había llegado). Esta tarjeta solo
-// aparece si ese patrón sigue presente, y el botón es seguro de pulsar más de
-// una vez: si ya está reparado, no hace nada.
-function renderCardMantenimiento(){
-  const h = estado.historial;
-  const oct23 = h.filter(x => x.fecha === '2026-10-23');
-  const nov06 = h.filter(x => x.fecha === '2026-11-06');
-  const nov13 = h.filter(x => x.fecha === '2026-11-13');
-  const hay16MalFechado = oct23.some(x => (x.pistas||[]).some(p => [...p.parejaA, ...p.parejaB].includes('j27')));
-  const hay30MalFechado = nov06.length === 1;
-  const hayDuplicado13 = nov13.length === 2 && JSON.stringify(nov13[0]) === JSON.stringify(nov13[1]);
-  if (!hay16MalFechado && !hay30MalFechado && !hayDuplicado13) return '';
-  return `
-    <div class="card">
-      <h3>⚠️ Reparar historial (fechas de octubre-noviembre)</h3>
-      <p class="muted">
-        La jornada del 16/10 quedó guardada con la fecha 23/10 (duplicando esa fecha), la del 30/10 se guardó con la
-        fecha 06/11, y la del 06/11 se guardó dos veces con la fecha 13/11 (una de esas dos copias es un duplicado exacto).
-      </p>
-      <p class="muted">Este botón solo corrige esas fechas y borra la copia duplicada exacta. No toca resultados ni puntos de nadie.</p>
-      <button id="btnRepararHistorial" class="peligro">Reparar fechas y quitar el duplicado</button>
-      <p class="muted" id="avisoReparar" style="margin-top:8px;"></p>
-    </div>
-  `;
-}
-
-async function repararHistorialFechas(){
-  if (!confirm(
-    'Esto va a:\n' +
-    '• Cambiar a 16/10/2026 la fecha de la jornada del 16/10 que está guardada como 23/10.\n' +
-    '• Cambiar a 30/10/2026 la fecha de la jornada del 30/10 que está guardada como 06/11.\n' +
-    '• Cambiar a 06/11/2026 la fecha de una de las dos jornadas guardadas como 13/11.\n' +
-    '• Borrar la otra copia de esa jornada del 13/11, que es un duplicado exacto.\n\n' +
-    'No se toca ningún resultado ni punto, solo fechas y el duplicado. ¿Continuar?'
-  )) return;
-
-  let huboCambios = false;
-  const ok = await guardarEstado(est => {
-    const h = est.historial;
-
-    const la16Mal = h.filter(x => x.fecha === '2026-10-23' && (x.pistas||[]).some(p => [...p.parejaA, ...p.parejaB].includes('j27')));
-    if (la16Mal.length === 1){ la16Mal[0].fecha = '2026-10-16'; huboCambios = true; }
-
-    const la30Mal = h.filter(x => x.fecha === '2026-11-06');
-    if (la30Mal.length === 1){ la30Mal[0].fecha = '2026-10-30'; huboCambios = true; }
-
-    const idx13 = h.map((_, i) => i).filter(i => h[i].fecha === '2026-11-13');
-    if (idx13.length === 2 && JSON.stringify(h[idx13[0]]) === JSON.stringify(h[idx13[1]])){
-      h[idx13[0]].fecha = '2026-11-06';
-      est.historial = h.filter((_, i) => i !== idx13[1]);
-      huboCambios = true;
-    }
-
-    return est;
-  });
-
-  const avisoEl = document.getElementById('avisoReparar');
-  if (ok && huboCambios){
-    mostrarAviso('Historial reparado: fechas corregidas y duplicado eliminado.', 'ok');
-  } else if (ok && avisoEl){
-    avisoEl.textContent = 'No se ha encontrado nada que coincida con el patrón esperado (puede que ya estuviera reparado).';
-  }
-}
-
 function renderPanelAdmin(){
   const panel = document.getElementById('panelAdmin');
   const jor = estado.jornadaActual;
@@ -1528,6 +1488,12 @@ function renderPanelAdmin(){
 
     <div class="card">
       <h3>Fecha de la próxima jornada</h3>
+      ${(() => {
+        const esperada = fechaSiguienteEsperada();
+        return esperada
+          ? `<p class="muted" style="margin:0 0 8px;">Si se juega cada semana sin falta, esta tendría que ser el <strong>${formatearFecha(esperada)}</strong> (última jugada: ${formatearFecha(estado.historial[estado.historial.length-1].fecha)}).</p>`
+          : '';
+      })()}
       <div class="campo">
         <label>Fecha (por si esta semana se cambia el día habitual)</label>
         <input type="date" id="fechaManual" value="${jor.fecha || ''}">
@@ -1556,7 +1522,6 @@ function renderPanelAdmin(){
       <button id="btnNuevaTemporada" class="secundario">Cerrar temporada ${estado.temporadaActual} y empezar la Temporada ${estado.temporadaActual + 1}</button>
       <p class="muted" style="margin-top:8px;">La clasificación y el historial de la Temporada ${estado.temporadaActual} quedan guardados (se pueden volver a ver desde "Clasificación"). La nueva temporada empieza con la clasificación a cero, sin tocar los jugadores apuntados ni la próxima jornada.</p>
     </div>
-    ${renderCardMantenimiento()}
 
     <div class="card">
       <h3>Jugadores</h3>
@@ -1615,11 +1580,15 @@ function renderPanelAdmin(){
     if (ok) mostrarAviso(`Temporada ${num} archivada. Empieza la Temporada ${num + 1}.`, 'ok');
   };
 
-  const btnReparar = document.getElementById('btnRepararHistorial');
-  if (btnReparar) btnReparar.onclick = repararHistorialFechas;
-
   document.getElementById('btnGuardarFecha').onclick = async () => {
     const f = document.getElementById('fechaManual').value;
+    const esperada = fechaSiguienteEsperada();
+    if (f && esperada && f !== esperada){
+      if (!confirm(
+        `Ojo: si se juega cada semana sin falta, esta jornada tendría que ser el ${formatearFecha(esperada)}, y has puesto ${formatearFecha(f)}. ` +
+        `¿Seguro que ${formatearFecha(f)} es la fecha correcta? (si esta semana se cambia de día o no se jugó la anterior, confirma igualmente)`
+      )) return;
+    }
     const ok = await guardarEstado(est => { est.jornadaActual.fecha = f || null; return est; });
     if (ok) mostrarAviso('Fecha actualizada.', 'ok');
   };
