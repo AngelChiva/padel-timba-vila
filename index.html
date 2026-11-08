@@ -261,7 +261,8 @@
   <!-- LIGA -->
   <section class="vista activa" id="vista-liga">
     <div class="card">
-      <h2>Clasificación de la temporada</h2>
+      <h2>Clasificación <span id="tituloTemporada"></span></h2>
+      <div id="selectorTemporadaWrap" style="margin-bottom:8px;"></div>
       <p class="muted" id="ligaResumen"></p>
       <div id="ligaPodio"></div>
       <table id="wrapTablaLigaResto">
@@ -484,7 +485,9 @@ function estadoInicial(){
     // días. Al cerrar jornadaActual, este listado pasa a ser el punto de
     // partida de la nueva jornadaActual (ver cerrarJornada()).
     proximaJornada: { apuntados: [] },
-    historial: [],           // jornadas ya cerradas: {fecha, pistas, resultados, puntos:{id:pts}, ausentes:[id]}
+    historial: [],           // jornadas ya cerradas de la temporada ACTUAL: {fecha, pistas, resultados, puntos:{id:pts}, ausentes:[id]}
+    temporadaActual: 1,       // número de la temporada en curso
+    temporadasArchivadas: [], // temporadas cerradas: {numero, historial, cerradaEn}
     creadoEn: ahora
   };
 }
@@ -590,6 +593,8 @@ REF_ESTADO.onSnapshot(
     // falta reescribir Firestore para esto; el siguiente guardarEstado ya los fija).
     if (!estado.proximaJornada) estado.proximaJornada = { apuntados: [] };
     if (estado.horario && !estado.horario.duracionMinutos) estado.horario.duracionMinutos = 90;
+    if (!estado.temporadaActual) estado.temporadaActual = 1;
+    if (!estado.temporadasArchivadas) estado.temporadasArchivadas = [];
     marcarConexion('sincronizado', 'ok');
     renderTodo();
   },
@@ -786,10 +791,45 @@ function bloqueFilaResto(grupo, claseGrupo, inicioPuesto){
   return `<div class="fila-resto ${claseGrupo}">${grupo.map((f, i) => marcoBase(f, inicioPuesto + i)).join('')}</div>`;
 }
 
+// Qué temporada se está viendo en la pestaña Liga: 'actual' o un número de
+// temporada archivada. Es solo de visualización en memoria (no se guarda).
+let temporadaVista = 'actual';
+
+function renderSelectorTemporada(){
+  const wrap = document.getElementById('selectorTemporadaWrap');
+  const archivadas = (estado.temporadasArchivadas || []).slice().sort((a,b) => b.numero - a.numero);
+  if (!archivadas.length){
+    wrap.innerHTML = '';
+    temporadaVista = 'actual';
+    return;
+  }
+  wrap.innerHTML = `
+    <label class="muted" style="margin-right:6px;">Temporada:</label>
+    <select id="selectTemporadaVista">
+      <option value="actual">Temporada ${estado.temporadaActual} (actual)</option>
+      ${archivadas.map(t => `<option value="${t.numero}">Temporada ${t.numero} (archivada)</option>`).join('')}
+    </select>
+  `;
+  const sel = document.getElementById('selectTemporadaVista');
+  sel.value = String(temporadaVista);
+  sel.onchange = () => { temporadaVista = sel.value === 'actual' ? 'actual' : Number(sel.value); renderLiga(); };
+}
+
 function renderLiga(){
+  renderSelectorTemporada();
+
+  const viendoArchivada = temporadaVista !== 'actual';
+  const archivo = viendoArchivada
+    ? (estado.temporadasArchivadas || []).find(t => t.numero === temporadaVista)
+    : null;
+  const historialVisto = viendoArchivada ? ((archivo && archivo.historial) || []) : estado.historial;
+
+  document.getElementById('tituloTemporada').textContent =
+    viendoArchivada ? `— Temporada ${temporadaVista} (archivada)` : `— Temporada ${estado.temporadaActual}`;
+
   const puntos = {}; const jornadasJugadas = {};
   estado.jugadores.forEach(j => { puntos[j.id] = 0; jornadasJugadas[j.id] = 0; });
-  estado.historial.forEach(jor => {
+  historialVisto.forEach(jor => {
     Object.entries(jor.puntos || {}).forEach(([id, pts]) => {
       if (puntos[id] === undefined) return;
       puntos[id] += pts;
@@ -801,9 +841,9 @@ function renderLiga(){
     .sort((a,b) => b.pts - a.pts || a.nombre.localeCompare(b.nombre));
 
   document.getElementById('ligaResumen').textContent =
-    estado.historial.length === 0
+    historialVisto.length === 0
       ? 'Todavía no se ha jugado ninguna jornada.'
-      : `${estado.historial.length} jornada(s) jugada(s).`;
+      : `${historialVisto.length} jornada(s) jugada(s).`;
 
   const wrapTabla = document.getElementById('wrapTablaLigaResto');
 
@@ -1185,10 +1225,24 @@ function leerResultadosDelFormulario(){
 
 async function guardarResultadosParciales(){
   const resultados = leerResultadosDelFormulario();
+  const btn = document.getElementById('btnGuardarResultados');
+  const textoNormal = 'Guardar resultados';
+  if (btn){ btn.disabled = true; btn.textContent = 'Guardando…'; }
   const ok = await guardarEstado(est => {
     est.jornadaActual.resultados = resultados;
     return est;
   });
+  if (btn){
+    btn.disabled = false;
+    if (ok){
+      // Confirmación visible en el propio botón (además del aviso global), para
+      // que quede claro que SÍ se ha guardado y no haga falta volver a tocarlo.
+      btn.textContent = '✓ Guardado';
+      setTimeout(() => { if (btn.textContent === '✓ Guardado') btn.textContent = textoNormal; }, 2500);
+    } else {
+      btn.textContent = textoNormal;
+    }
+  }
   if (ok) mostrarAviso('Resultados guardados.', 'ok');
 }
 
@@ -1246,7 +1300,18 @@ async function cerrarJornada(){
     return;
   }
 
-  if (!confirm('¿Cerrar la jornada y repartir los puntos? Después no se podrá editar el resultado desde aquí.')) return;
+  // Si esta fecha ya está en el historial, lo más probable es que ya se haya
+  // cerrado esta misma jornada antes (p.ej. doble clic, o se volvió a abrir
+  // por error) — avisamos claro en vez de dejar que se vuelva a guardar.
+  const fechaLegible = jor.fecha ? formatearFecha(jor.fecha) : '(sin fecha puesta)';
+  if (jor.fecha && estado.historial.some(h => h.fecha === jor.fecha)){
+    document.getElementById('avisoResultadosCierre').textContent =
+      `Ya hay una jornada guardada con la fecha ${fechaLegible} en el historial. No se va a volver a guardar para evitar duplicarla. ` +
+      `Si la fecha de HOY no es esa, cambia la fecha de la jornada antes de cerrar (en "Fecha de la próxima jornada").`;
+    return;
+  }
+
+  if (!confirm(`¿Cerrar la jornada del ${fechaLegible} y repartir los puntos? Después no se podrá editar el resultado desde aquí.`)) return;
 
   const n = estado.numPistas;
   const puntos = {};
@@ -1261,7 +1326,26 @@ async function cerrarJornada(){
   // jugadores activos que no jugaron esta jornada -> 0 puntos, sin cambios de pista
   const ausentes = jugadoresActivos().map(j=>j.id).filter(id => !idsQueJugaron.has(id));
 
+  // Firma exacta de ESTA jornada (fecha + sorteo). Dentro de la transacción se
+  // compara contra el dato recién leído de Firestore: si otro intento (doble
+  // clic, reintento de red...) ya cerró esta misma jornada mientras tanto, NO
+  // se vuelve a añadir al historial, así nunca se duplica.
+  const firmaJornada = JSON.stringify({ fecha: jor.fecha, pistas: jor.pistas });
+
+  const btnCerrar = document.getElementById('btnCerrarJornada');
+  const btnGuardar = document.getElementById('btnGuardarResultados');
+  if (btnCerrar){ btnCerrar.disabled = true; btnCerrar.textContent = 'Cerrando…'; }
+  if (btnGuardar){ btnGuardar.disabled = true; }
+
+  let yaEstabaCerrada = false;
   const ok = await guardarEstado(est => {
+    const firmaActual = JSON.stringify({ fecha: est.jornadaActual.fecha, pistas: est.jornadaActual.pistas });
+    const fechaYaEnHistorial = jor.fecha && est.historial.some(h => h.fecha === jor.fecha);
+    if (firmaActual !== firmaJornada || fechaYaEnHistorial){
+      // Ya se cerró esta misma jornada por otro intento en curso: no la dupliquemos.
+      yaEstabaCerrada = true;
+      return est;
+    }
     est.historial.push({
       fecha: jor.fecha,
       pistas: jor.pistas,
@@ -1286,7 +1370,15 @@ async function cerrarJornada(){
     est.proximaJornada = { apuntados: [] };
     return est;
   });
-  if (ok) mostrarAviso('Jornada cerrada y puntos repartidos.', 'ok');
+
+  if (btnCerrar){ btnCerrar.disabled = false; btnCerrar.textContent = 'Cerrar jornada y repartir puntos'; }
+  if (btnGuardar){ btnGuardar.disabled = false; }
+
+  if (ok && yaEstabaCerrada){
+    mostrarAviso(`La jornada del ${fechaLegible} ya se había cerrado justo antes (no se ha duplicado nada).`, 'info');
+  } else if (ok){
+    mostrarAviso(`Jornada del ${fechaLegible} cerrada y puntos repartidos.`, 'ok');
+  }
 }
 
 // ---- JUGADORES --------------------------------------------------------------
@@ -1342,6 +1434,75 @@ function renderAdmin(){
   }
 }
 
+// --------------------------------------------------------------------------
+// Reparación puntual del historial de octubre-noviembre 2026: por el fallo de
+// guardado doble (ver cerrarJornada), la jornada del 16/10 quedó con la fecha
+// 23/10 (duplicando esa fecha con la que sí era del 23/10), la del 30/10 se
+// guardó con la fecha 06/11, y la del 06/11 se guardó DOS veces con la fecha
+// 13/11 (fecha que además todavía no había llegado). Esta tarjeta solo
+// aparece si ese patrón sigue presente, y el botón es seguro de pulsar más de
+// una vez: si ya está reparado, no hace nada.
+function renderCardMantenimiento(){
+  const h = estado.historial;
+  const oct23 = h.filter(x => x.fecha === '2026-10-23');
+  const nov06 = h.filter(x => x.fecha === '2026-11-06');
+  const nov13 = h.filter(x => x.fecha === '2026-11-13');
+  const hay16MalFechado = oct23.some(x => (x.pistas||[]).some(p => [...p.parejaA, ...p.parejaB].includes('j27')));
+  const hay30MalFechado = nov06.length === 1;
+  const hayDuplicado13 = nov13.length === 2 && JSON.stringify(nov13[0]) === JSON.stringify(nov13[1]);
+  if (!hay16MalFechado && !hay30MalFechado && !hayDuplicado13) return '';
+  return `
+    <div class="card">
+      <h3>⚠️ Reparar historial (fechas de octubre-noviembre)</h3>
+      <p class="muted">
+        La jornada del 16/10 quedó guardada con la fecha 23/10 (duplicando esa fecha), la del 30/10 se guardó con la
+        fecha 06/11, y la del 06/11 se guardó dos veces con la fecha 13/11 (una de esas dos copias es un duplicado exacto).
+      </p>
+      <p class="muted">Este botón solo corrige esas fechas y borra la copia duplicada exacta. No toca resultados ni puntos de nadie.</p>
+      <button id="btnRepararHistorial" class="peligro">Reparar fechas y quitar el duplicado</button>
+      <p class="muted" id="avisoReparar" style="margin-top:8px;"></p>
+    </div>
+  `;
+}
+
+async function repararHistorialFechas(){
+  if (!confirm(
+    'Esto va a:\n' +
+    '• Cambiar a 16/10/2026 la fecha de la jornada del 16/10 que está guardada como 23/10.\n' +
+    '• Cambiar a 30/10/2026 la fecha de la jornada del 30/10 que está guardada como 06/11.\n' +
+    '• Cambiar a 06/11/2026 la fecha de una de las dos jornadas guardadas como 13/11.\n' +
+    '• Borrar la otra copia de esa jornada del 13/11, que es un duplicado exacto.\n\n' +
+    'No se toca ningún resultado ni punto, solo fechas y el duplicado. ¿Continuar?'
+  )) return;
+
+  let huboCambios = false;
+  const ok = await guardarEstado(est => {
+    const h = est.historial;
+
+    const la16Mal = h.filter(x => x.fecha === '2026-10-23' && (x.pistas||[]).some(p => [...p.parejaA, ...p.parejaB].includes('j27')));
+    if (la16Mal.length === 1){ la16Mal[0].fecha = '2026-10-16'; huboCambios = true; }
+
+    const la30Mal = h.filter(x => x.fecha === '2026-11-06');
+    if (la30Mal.length === 1){ la30Mal[0].fecha = '2026-10-30'; huboCambios = true; }
+
+    const idx13 = h.map((_, i) => i).filter(i => h[i].fecha === '2026-11-13');
+    if (idx13.length === 2 && JSON.stringify(h[idx13[0]]) === JSON.stringify(h[idx13[1]])){
+      h[idx13[0]].fecha = '2026-11-06';
+      est.historial = h.filter((_, i) => i !== idx13[1]);
+      huboCambios = true;
+    }
+
+    return est;
+  });
+
+  const avisoEl = document.getElementById('avisoReparar');
+  if (ok && huboCambios){
+    mostrarAviso('Historial reparado: fechas corregidas y duplicado eliminado.', 'ok');
+  } else if (ok && avisoEl){
+    avisoEl.textContent = 'No se ha encontrado nada que coincida con el patrón esperado (puede que ya estuviera reparado).';
+  }
+}
+
 function renderPanelAdmin(){
   const panel = document.getElementById('panelAdmin');
   const jor = estado.jornadaActual;
@@ -1390,6 +1551,14 @@ function renderPanelAdmin(){
     </div>
 
     <div class="card">
+      <h3>Temporada</h3>
+      <p class="muted">Temporada actual: <strong>${estado.temporadaActual}</strong> · ${estado.historial.length} jornada(s) jugada(s) en esta temporada.</p>
+      <button id="btnNuevaTemporada" class="secundario">Cerrar temporada ${estado.temporadaActual} y empezar la Temporada ${estado.temporadaActual + 1}</button>
+      <p class="muted" style="margin-top:8px;">La clasificación y el historial de la Temporada ${estado.temporadaActual} quedan guardados (se pueden volver a ver desde "Clasificación"). La nueva temporada empieza con la clasificación a cero, sin tocar los jugadores apuntados ni la próxima jornada.</p>
+    </div>
+    ${renderCardMantenimiento()}
+
+    <div class="card">
       <h3>Jugadores</h3>
       <div class="campo">
         <label>Añadir jugador</label>
@@ -1427,6 +1596,27 @@ function renderPanelAdmin(){
     const btnSorteo = document.getElementById('btnHacerSorteo');
     if (btnSorteo) btnSorteo.onclick = realizarSorteo;
   }
+
+  const btnNuevaTemporada = document.getElementById('btnNuevaTemporada');
+  if (btnNuevaTemporada) btnNuevaTemporada.onclick = async () => {
+    const num = estado.temporadaActual;
+    if (!confirm(
+      `¿Cerrar la Temporada ${num} y empezar la Temporada ${num + 1}?\n\n` +
+      `La clasificación y el historial de la Temporada ${num} (${estado.historial.length} jornada(s)) quedan guardados y se pueden ` +
+      `seguir viendo desde "Clasificación". La Temporada ${num + 1} empieza con la clasificación a cero.`
+    )) return;
+    const ok = await guardarEstado(est => {
+      est.temporadasArchivadas = est.temporadasArchivadas || [];
+      est.temporadasArchivadas.push({ numero: est.temporadaActual || 1, historial: est.historial, cerradaEn: Date.now() });
+      est.historial = [];
+      est.temporadaActual = (est.temporadaActual || 1) + 1;
+      return est;
+    });
+    if (ok) mostrarAviso(`Temporada ${num} archivada. Empieza la Temporada ${num + 1}.`, 'ok');
+  };
+
+  const btnReparar = document.getElementById('btnRepararHistorial');
+  if (btnReparar) btnReparar.onclick = repararHistorialFechas;
 
   document.getElementById('btnGuardarFecha').onclick = async () => {
     const f = document.getElementById('fechaManual').value;
